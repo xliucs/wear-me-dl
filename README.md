@@ -1,174 +1,102 @@
 # WEAR-ME: Deep Learning for Insulin Resistance & HbA1c Prediction
 
-Predicting **True_HOMA_IR** and **True_hba1c** from anonymized wearable (Fitbit) and clinical data using PyTorch deep learning models.
+Predicting **True_HOMA_IR** and **True_hba1c** from anonymized wearable (Fitbit) and clinical data.
 
-## 🎯 Goals
+## Best Results (Stratified 5-Fold CV, 3-5 Repeats)
 
-| Target | Features | R² Goal | Best R² So Far | Status |
-|--------|----------|---------|----------------|--------|
-| True_HOMA_IR | All (demographics + wearables + blood) | 0.85 | 0.555 | 🔄 In Progress |
-| True_HOMA_IR | Demographics + Wearables only | 0.70 | TBD | 🔄 In Progress |
-| True_hba1c | All (demographics + wearables + blood) | 0.85 | ~0.45 | 🔄 In Progress |
-| True_hba1c | Demographics + Wearables only | 0.70 | TBD | 🔄 In Progress |
+| Target | Features | R² Target | **Best R²** | Method |
+|--------|----------|-----------|-------------|--------|
+| HOMA_IR | ALL | 0.65 | **0.5948** | HGBR_log + XGB blend |
+| HOMA_IR | DW only | 0.37 | **0.2657** | Ridge stack |
+| hba1c | ALL | 0.85 | **0.4916** | XGB + ExtraTrees blend |
+| hba1c | DW only | 0.70 | **0.1651** | Ridge + ExtraTrees |
 
-## 📊 Dataset
+- **ALL** = Demographics + Wearables + Blood Biomarkers (35 selected from 83+ engineered)
+- **DW** = Demographics + Wearables only (32 engineered features)
+
+See [RESULTS.md](RESULTS.md) for detailed results, version history, and analysis.
+
+## Dataset
 
 - **Source:** Anonymized WEAR-ME study data
-- **Samples:** 798 participants
-- **Feature Groups:**
-  - **Demographics (3):** age, sex, BMI
-  - **Fitbit Wearable (15):** Resting HR, HRV, steps, sleep duration, active zone minutes (mean/median/std)
-  - **Blood Biomarkers (46):** Lipid panel, CBC, metabolic panel, inflammation markers
-  - **Engineered Features (30+):** TyG index, TyG-BMI, trig/HDL ratio, metabolic syndrome score, etc.
-- **Labels:**
-  - `True_HOMA_IR` — Homeostatic Model Assessment for Insulin Resistance (continuous)
-  - `True_hba1c` — Glycated hemoglobin (continuous)
-  - Classification labels used as auxiliary tasks: IR class, diabetes class
+- **Samples:** 798 participants (full dataset: 1165)
+- **Features:**
+  - Demographics (3): age, sex, BMI
+  - Fitbit Wearable (15): Resting HR, HRV, steps, sleep duration, active zone minutes (mean/median/std)
+  - Blood Biomarkers (46): Lipid panel, CBC, metabolic panel, inflammation markers
+  - Engineered (40+): TyG, METS-IR, glucose×BMI, insulin proxies, glycation features
 
-## 🏗️ Architecture & Approach
+## Approach
 
-### Models Implemented (PyTorch)
+### Feature Engineering
+- **Metabolic indices**: TyG, METS-IR, glucose×BMI, triglyceride/HDL ratio
+- **Insulin resistance proxies**: glucose×BMI×triglycerides/HDL
+- **Glycation features**: glucose/hemoglobin, glucose×RDW, glucose×MCHC
+- **Wearable interactions**: RHR×BMI, steps×sleep, cardio fitness index
 
-1. **ResNet MLP** — Deep residual MLP with LayerNorm + GELU activation
-   - Skip connections prevent gradient degradation
-   - Best single-model performance so far
-   
-2. **FT-Transformer** — Feature Tokenizer + Transformer encoder
-   - Each feature tokenized into learned embedding
-   - CLS token for prediction
-   - State-of-the-art for tabular data (Gorishniy et al., 2021)
+### Models (15+ tested)
+- **Tree-based**: XGBoost, LightGBM, HistGradientBoosting, RandomForest, ExtraTrees
+- **Linear**: Ridge, Lasso, ElasticNet
+- **Neural**: PyTorch FeatureGatedBlock (residual MLP with feature gating)
+- **Transformer**: TabPFN (pretrained tabular transformer)
+- **Other**: SVR, KNN
 
-3. **Deep Cross Network v2 (DCNv2)** — Explicit feature crossing + deep network
-   - Cross layers learn bounded-degree feature interactions
-   - Combined with deep MLP branch
+### Ensemble Strategy
+- Feature selection via GBR importance (top 30-35 features)
+- Dirichlet weight search (200K-500K random blends)
+- Ridge stacking on out-of-fold predictions
+- Repeated stratified CV (3-5 repeats) for stable estimates
 
-4. **Self-Normalizing Neural Network (SNN)** — SELU activation + AlphaDropout
-   - Automatically maintains normalized activations
-   - Good for small datasets
+## Key Findings
 
-5. **Multi-Task ResNet** — Shared backbone with auxiliary classification heads
-   - Auxiliary IR classification + diabetes classification
-   - Extra supervision signal improves representation learning
-   - Classification weight decays during training
+1. **HGBR with log-transform** is the best single model for HOMA_IR (R²=0.589)
+2. **Feature selection is the #1 lever**: top 35 beats all 83+ features
+3. **Signal ceiling reached**: residuals not predictable from features (R²=-0.41)
+4. **HOMA_IR = glucose × insulin / 405**: without insulin, there's a hard information ceiling
+5. **hba1c = 3-month avg glucose**: single fasting glucose (r=0.605) can only explain ~37%
+6. **DW targets need time-series embeddings**: summary statistics lose temporal patterns
+7. **PyTorch NNs underperform trees by ~0.12 R²** at this data scale (798 samples)
 
-6. **Wide Shallow Networks** — 1024-2048 hidden units, 2 layers
-   - Heavy dropout regularization
-
-7. **Gradient-Boosted Neural Networks** — Sequential residual learning
-   - Train small NNs on residuals (neural XGBoost)
-
-8. **KNN-Augmented Networks** — KNN predictions as extra features
-   - Combines local (KNN) and global (NN) patterns
-
-9. **Autoencoder + Regressor** — Denoising AE pretraining + regression finetuning
-   - Learn robust representations first
-
-### Training Strategy
-
-- **5-Fold Cross Validation** with fixed seed (42) for reproducibility
-- **Target Transforms:** log1p (for right-skewed HOMA_IR), quantile normalization
-- **Feature Scaling:** StandardScaler per fold
-- **Feature Selection:** Mutual Information Regression (top 25-60 features)
-- **Data Augmentation:** Mixup (α=0.2) applied 50% of batches
-- **Loss Function:** Huber loss (δ=1.0) for robustness to outliers
-- **Optimizer:** AdamW with cosine annealing + warmup (15 epochs)
-- **Early Stopping:** patience=40-60 epochs
-- **Deep Ensembling:** Multiple seeds × multiple architectures
-- **Hardware:** Apple Mac Mini M-series (MPS + CPU)
-
-### Feature Engineering (Domain Knowledge)
-
-Key engineered features based on clinical literature:
-- **TyG Index** = log(triglycerides × glucose / 2) — validated HOMA-IR proxy
-- **TyG-BMI** = TyG × BMI — enhanced insulin resistance proxy
-- **Triglyceride/HDL ratio** — metabolic syndrome indicator
-- **Neutrophil-Lymphocyte Ratio (NLR)** — inflammation marker
-- **Metabolic Syndrome Score** — composite of BMI>30, TG>150, glucose>100, HDL<40
-- **Wearable variability features** — CV of HR, HRV, steps, sleep
-
-## 📁 Project Structure
+## Project Structure
 
 ```
-insulin_resistance/
-├── README.md                  # This file
-├── data.csv                   # Dataset (not tracked in git)
-├── explore_data.py            # Data exploration & analysis
-├── train.py                   # V1: Broad architecture search
-├── train_v2.py                # V2: Feature engineering + multi-arch
-├── train_v3.py                # V3: CPU-optimized lean training
-├── train_lean.py              # V3.5: Memory-efficient pipeline
-├── train_fast.py              # V4: Focused fast experiments
-├── train_v4.py                # V4: MI selection + multi-task learning
-├── train_v5.py                # V5: TabPFN + stacking (MPS)
-├── train_v6_boosted.py        # V6: Boosted NN + wide nets + KNN
-├── quick_baseline.py          # Sklearn baselines (Ridge, GBR, RF)
-├── results_*.json             # CV results from each version
+├── README.md                    # This file
+├── RESULTS.md                   # Detailed results & analysis
+├── data.csv                     # Dataset (not tracked)
+├── explore_data.py              # Data exploration
+├── quick_baseline.py            # Sklearn baselines
+├── analyze_errors.py            # Error analysis
+├── deep_analysis.py             # Deep diagnostic analysis
+├── pytorch_model.py             # PyTorch FeatureGatedBlock architecture
+├── train_v11_comprehensive.py   # V11: Best results (HGBR + target-specific features)
+├── train_v13_lgbm.py            # V13: LightGBM + comprehensive stacking
+├── train_v14_megablend.py       # V14: 5-repeat mega-blend optimization
+├── train_v15_augment.py         # V15: SMOTE + self-training + PyTorch
+├── train_v[1-8]*.py             # Earlier versions (architecture exploration)
 └── .gitignore
 ```
 
-## 🔬 Key Findings So Far
-
-### Data Ceiling Analysis
-- **HOMA_IR** = fasting_insulin × fasting_glucose / 405
-  - Fasting insulin is NOT in the dataset — this is the fundamental bottleneck
-  - Glucose alone correlates r=0.56 with HOMA_IR
-  - Best proxy: TyG-BMI index (TyG × BMI)
-  - Sklearn HistGBR baseline: R² ≈ 0.61 (log target)
-  
-- **hba1c** (glycated hemoglobin)
-  - Glucose correlates r=0.60 with hba1c
-  - Age correlates r=0.33 (age-related glycation)
-  - RDW has unexpected correlation r=0.19
-
-### Model Comparison (HOMA_IR, all features, 5-fold CV)
-| Model | Transform | R² |
-|-------|-----------|-----|
-| ResNet 256×6 | log | 0.555 ± 0.097 |
-| Multi-Task ResNet 128×4 | log | 0.533 ± 0.081 |
-| Ensemble (40 feat, MT+SNN) | log | 0.540 ± 0.104 |
-| Wide Shallow 1024 | log | 0.397 ± 0.146 |
-| SNN 256×6 | log | 0.430 ± 0.153 |
-| HistGBR (sklearn baseline) | log | 0.613 ± 0.068 |
-
-### Observations
-1. ResNet MLP with log target transform is the best DL architecture
-2. Multi-task auxiliary classification provides modest improvement
-3. Feature selection (MI) helps reduce overfitting (40 > 96 features)
-4. Deep ensembling improves stability but not R² ceiling
-5. Wide shallow networks underperform deep residual ones
-6. MPS (Apple GPU) shows training instability — CPU more reliable
-
-## 🚀 Running
+## Running
 
 ```bash
-# Install dependencies
-pip install torch pandas scikit-learn numpy matplotlib
+pip install torch pandas scikit-learn xgboost lightgbm tabpfn numpy
 
-# Explore data
-python explore_data.py
+# Best results (V11)
+python train_v11_comprehensive.py
 
-# Run latest training (V6: boosted + wide + KNN)
-python train_v6_boosted.py
+# LightGBM experiments
+python train_v13_lgbm.py
 
-# Run focused training (V4: multi-task + MI selection)
-python train_v4.py
+# PyTorch model
+python pytorch_model.py
 
-# Quick sklearn baselines
+# Quick baselines
 python quick_baseline.py
 ```
 
-## 📚 References
-
-- Gorishniy et al. (2021) "Revisiting Deep Learning Models for Tabular Data" (FT-Transformer)
-- Wang et al. (2021) "DCN V2: Improved Deep & Cross Network" 
-- Klambauer et al. (2017) "Self-Normalizing Neural Networks"
-- Simental-Mendía et al. (2008) "TyG index as insulin resistance marker"
-- Arik & Pfister (2021) "TabNet: Attentive Interpretable Tabular Learning"
-
-## ⏱️ Timeline
-
-- **V1-V3:** Architecture exploration (ResNet, FT-Transformer, DCN, SNN)
-- **V4:** Multi-task learning with auxiliary classification
-- **V5:** TabPFN + stacking (blocked by HF auth)
-- **V6:** Boosted neural nets + KNN augmentation + autoencoder pretraining
-- **Next:** Hyperparameter Bayesian optimization, neural architecture search
+## Requirements
+- Python 3.10+
+- PyTorch 2.0+
+- scikit-learn, XGBoost, LightGBM
+- pandas, numpy
+- TabPFN (optional, requires HuggingFace token)
