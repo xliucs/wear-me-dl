@@ -1,82 +1,55 @@
-# Results Summary
+# WEAR-ME Deep Learning Results
 
-All results use 5-fold cross-validation. V7 uses stratified k-fold for more realistic estimates.
+## Best Results (5-fold Stratified CV, OOF R²)
 
-## HOMA_IR — All Features (demographics + wearables + blood biomarkers)
-
-| Version | Method | R² (mean ± std) | Notes |
-|---------|--------|-----------------|-------|
-| V7 | Two-Stage Ensemble (5 seeds, weighted) | **0.547 ± 0.018** | Stratified CV, inverse-freq weights |
-| V7 | sqrt_inverse + asymmetric loss | 0.524 ± 0.014 | Stratified CV |
-| V7 | Baseline ResNet 256×6 | 0.514 ± 0.022 | Stratified CV |
-| Final | ResNet 256×6 standard transform | 0.551 ± 0.097 | Regular CV (inflated) |
-| Final | Ensemble 10 models log | 0.544 ± 0.091 | Regular CV |
-| V3 | ResNet 256×6 log | 0.555 ± 0.097 | Regular CV (inflated) |
-| V5 | MT_ResNet 128×4 log | 0.533 ± 0.081 | Regular CV |
-| V6 | AE_Regressor log | 0.508 ± 0.091 | Regular CV |
-| Baseline | sklearn HistGBR log | ~0.61 | Regular CV |
-
-**Goal: R² ≥ 0.85** — Gap: 0.30
-
-## hba1c — All Features
-
-| Version | Method | R² (mean ± std) | Notes |
-|---------|--------|-----------------|-------|
-| V7 | sqrt_inverse + focal loss | **0.364 ± 0.093** | Stratified CV |
-| V7 | inverse_freq + focal loss | 0.360 ± 0.085 | Stratified CV |
-| V7 | Baseline ResNet 256×6 | 0.350 ± 0.120 | Stratified CV |
-| V6 | AE_Regressor log | 0.456 ± 0.111 | Regular CV |
-| Baseline | sklearn HistGBR | ~0.45 | Regular CV |
-
-**Goal: R² ≥ 0.85** — Gap: ~0.49
-
-*Note: V7 two-stage ensemble for hba1c still running*
-
-## HOMA_IR — Demographics + Wearables Only
-
-| Version | Method | R² (mean ± std) | Notes |
-|---------|--------|-----------------|-------|
-| V6 | WideShallow 1024 log | **0.177 ± 0.057** | Regular CV |
-| V6 | AE_Regressor log | 0.228 ± 0.029 | Regular CV |
-| V6 | WideShallow 1024 quantile | 0.180 ± 0.045 | Regular CV |
-
-**Goal: R² ≥ 0.70** — Gap: ~0.47
-
-*V7 DW experiments queued, will run after hba1c ALL completes*
-
-## hba1c — Demographics + Wearables Only
-
-| Version | Method | R² (mean ± std) | Notes |
-|---------|--------|-----------------|-------|
-| V6 | (not yet completed) | TBD | |
-
-**Goal: R² ≥ 0.70**
-
-*V7 DW experiments queued*
-
----
+| Target | Features | Best R² | Method | Target R² | Gap |
+|--------|----------|---------|--------|-----------|-----|
+| HOMA_IR | ALL (top35) | 0.587 | XGB ensemble blend (MAE+log+tree) | 0.65 | 0.063 |
+| HOMA_IR | DW only | 0.262 | TabPFN + Ridge blend | 0.37 | 0.108 |
+| hba1c | ALL | 0.484 | TabPFN (n_est=16) | 0.85 | 0.366 |
+| hba1c | DW only | 0.165 | TabPFN + Ridge blend | 0.70 | 0.535 |
 
 ## Key Findings
 
-### Why R² = 0.85 is extremely difficult for this dataset:
+### 1. Feature Selection is the #1 Lever
+- Top 35 features (by XGB importance) outperform all 87 features
+- Reducing from 87 → 35 features improves R² by ~0.02-0.03
+- Top features for HOMA_IR: glucose_bmi, mets_ir_bmi, glucose_proxy, glucose, tyg
 
-1. **Missing key variable**: HOMA_IR = fasting_insulin × glucose / 405. Fasting insulin is NOT in the dataset. We're predicting a formula where one of two inputs is missing.
+### 2. Overfitting is Extreme
+- Train R² = 1.0 for all tree models, Test R² ≈ 0.55
+- Gap = 0.45 even with regularized XGBoost
+- Early stopping helps marginally (50 rounds patience)
+- 798 samples × 87 features = severe curse of dimensionality
 
-2. **Severe class imbalance in regression**: 56% of HOMA_IR values are in 0-2 range, only 9.3% above 5. The model compresses predictions toward the mean.
+### 3. Prediction Compression is the Core Issue
+- Model pred std = 1.53 vs True std = 2.21 (compression = 0.69)
+- HOMA_IR 8+ (n=32): predicted mean 6.15, true mean 10.69
+- Residuals correlate r=0.43 with |glucose_bmi| — heteroscedastic errors
+- Residuals are NOT predictable from features (R² = -0.41)
 
-3. **Prediction compression**: Model pred std is only 70% of true std. Top 10% true values (mean=7.93) are predicted as 5.23 (34% under-prediction).
+### 4. DW Ceiling is Low Without Time-Series
+- BMI alone: r=0.35 with HOMA_IR → r² = 0.12
+- Best DW model: R² = 0.26 (TabPFN + Ridge blend)
+- Paper's 0.37 used masked autoencoder time-series embeddings, not summary stats
+- Summary stats lose temporal patterns that encode metabolic health
 
-4. **Irreducible error from normal-glucose/high-insulin cases**: The 32 samples with HOMA_IR > 8 have normal glucose (80-103) but extremely high insulin. These are fundamentally unpredictable without insulin data.
+### 5. Model Rankings
+- XGBoost with MAE/log target: consistently best single models
+- TabPFN v2.5: excellent on DW (less prone to overfitting)
+- Ridge/Lasso: competitive on DW (strong regularization helps)
+- Random Forest: good baseline, implicit regularization
+- Neural networks: generally underperform tree models on this dataset size
 
-5. **Small dataset**: Only 798 samples with 96+ features leads to overfitting.
+## Approaches Tried
 
-### Demographics + Wearables Only:
-- Without blood biomarkers (especially glucose, triglycerides), there is very little signal for insulin resistance
-- BMI alone is the strongest wearable-adjacent predictor (r≈0.35 with HOMA_IR)
-- Wearable features (HR, HRV, steps, sleep) have weak individual correlations (r < 0.15)
+1. **V1-V6**: Various NN architectures (ResNet MLP, SNN, DCN, FT-Transformer, Multi-task)
+2. **V7**: Informed training with loss weighting, two-stage ensemble, quantile transforms
+3. **V8**: Stacking framework (GBR base → NN meta-learner)
+4. **V9**: XGBoost with early stopping + Ridge stacking + autoencoder for DW
+5. **V10**: Repeated stratified CV (3×5-fold) for variance reduction
 
-### Error Analysis Highlights:
-- **Obese** patients easier to predict (R²=0.47) than **normal BMI** (R²=0.33)
-- **Female** patients easier (R²=0.61) than **male** (R²=0.48)
-- **Diabetic glucose range** hardest (R²=0.23) — most variance in insulin levels
-- See `analysis_True_HOMA_IR.png` and `analysis_True_hba1c.png` for t-SNE plots
+## Dataset Notes
+- N = 798 (subset of full WEAR-ME N=1165)
+- Published paper best: R² = 0.50 (on N=1165 with time-series embeddings)
+- Xin's internal baseline: R² = 0.65 (ALL), R² = 0.37 (DW) on full N=1165
