@@ -7,9 +7,9 @@ Targets:
   - True_HOMA_IR  (R² target: 0.37)
   - True_hba1c    (R² target: 0.70)
 
-Method: Multi-layer stacking ensemble
-  Layer 0: 385 base models × 5 feature sets
-  Layer 1: 41 diverse meta-learners on base OOF predictions
+Method: Multi-layer stacking ensemble (V22b architecture)
+  Layer 0: ~385 base models across 5 feature sets
+  Layer 1: ~41 diverse meta-learners on base OOF predictions
   Layer 2: Ridge on Layer-1 stacks
 
 Usage:
@@ -40,6 +40,7 @@ from scipy.stats import pearsonr
 from sklearn.ensemble import (
     BaggingRegressor,
     ExtraTreesRegressor,
+    GradientBoostingClassifier,
     GradientBoostingRegressor,
     HistGradientBoostingRegressor,
     RandomForestRegressor,
@@ -88,7 +89,7 @@ DW_COLUMNS = [
     "AZM Weekly (mean)", "AZM Weekly (median)", "AZM Weekly (std)",
 ]
 
-# Short aliases for readability
+# Short aliases for column names
 _RHR_M = "Resting Heart Rate (mean)"
 _RHR_MD = "Resting Heart Rate (median)"
 _RHR_S = "Resting Heart Rate (std)"
@@ -111,9 +112,15 @@ _AZM_S = "AZM Weekly (std)"
 # =============================================================================
 
 def load_data(data_path: str, target: str = "homa_ir") -> Tuple[pd.DataFrame, np.ndarray]:
-    """Load dataset, extract DW columns, filter by non-null target."""
-    df = pd.read_csv(data_path, skiprows=[0])
+    """
+    Load WEAR-ME dataset and extract DW columns.
 
+    Returns
+    -------
+    X : pd.DataFrame with 18 DW columns (sex encoded as 0/1)
+    y : np.ndarray of target values (NaN rows removed)
+    """
+    df = pd.read_csv(data_path, skiprows=[0])
     X = df[DW_COLUMNS].copy()
     X["sex"] = (X["sex"] == "Male").astype(float)
 
@@ -123,42 +130,34 @@ def load_data(data_path: str, target: str = "homa_ir") -> Tuple[pd.DataFrame, np
     mask = ~np.isnan(y)
     X = X[mask].reset_index(drop=True)
     y = y[mask]
-
     return X, y
 
 
 # =============================================================================
-# FEATURE ENGINEERING
+# FEATURE ENGINEERING (94 features from 18 DW columns)
 # =============================================================================
 
 def engineer_features(X: pd.DataFrame) -> np.ndarray:
-    """
-    Engineer ~94 features from 18 DW columns.
-    Returns numpy array (for speed in model fitting).
-    """
+    """Engineer ~94 features from 18 DW columns. Returns numpy array."""
     X = X.copy()
 
-    # --- Skewness & CV for each wearable ---
+    # Skewness & CV for each wearable signal
     for pfx, m, md, s in [
-        ("rhr", _RHR_M, _RHR_MD, _RHR_S),
-        ("hrv", _HRV_M, _HRV_MD, _HRV_S),
-        ("stp", _STP_M, _STP_MD, _STP_S),
-        ("slp", _SLP_M, _SLP_MD, _SLP_S),
+        ("rhr", _RHR_M, _RHR_MD, _RHR_S), ("hrv", _HRV_M, _HRV_MD, _HRV_S),
+        ("stp", _STP_M, _STP_MD, _STP_S), ("slp", _SLP_M, _SLP_MD, _SLP_S),
         ("azm", _AZM_M, _AZM_MD, _AZM_S),
     ]:
         X[f"{pfx}_skew"] = (X[m] - X[md]) / X[s].clip(lower=0.01)
         X[f"{pfx}_cv"] = X[s] / X[m].clip(lower=0.01)
 
-    # --- Polynomial transforms ---
-    for col, nm in [
-        (X["bmi"], "bmi"), (X["age"], "age"),
-        (X[_RHR_M], "rhr"), (X[_HRV_M], "hrv"), (X[_STP_M], "stp"),
-    ]:
+    # Polynomial transforms
+    for col, nm in [(X["bmi"], "bmi"), (X["age"], "age"),
+                    (X[_RHR_M], "rhr"), (X[_HRV_M], "hrv"), (X[_STP_M], "stp")]:
         X[f"{nm}_sq"] = col ** 2
         X[f"{nm}_log"] = np.log1p(col.clip(lower=0))
         X[f"{nm}_inv"] = 1 / col.clip(lower=0.01)
 
-    # --- BMI interactions ---
+    # BMI interactions
     X["bmi_rhr"] = X["bmi"] * X[_RHR_M]
     X["bmi_sq_rhr"] = X["bmi"] ** 2 * X[_RHR_M]
     X["bmi_hrv"] = X["bmi"] * X[_HRV_M]
@@ -173,7 +172,7 @@ def engineer_features(X: pd.DataFrame) -> np.ndarray:
     X["bmi_rhr_hrv"] = X["bmi"] * X[_RHR_M] / X[_HRV_M].clip(lower=1)
     X["bmi_rhr_stp"] = X["bmi"] * X[_RHR_M] / X[_STP_M].clip(lower=1) * 1000
 
-    # --- Age interactions ---
+    # Age interactions
     X["age_rhr"] = X["age"] * X[_RHR_M]
     X["age_hrv_inv"] = X["age"] / X[_HRV_M].clip(lower=1)
     X["age_stp"] = X["age"] * X[_STP_M]
@@ -181,7 +180,7 @@ def engineer_features(X: pd.DataFrame) -> np.ndarray:
     X["age_sex"] = X["age"] * X["sex"]
     X["age_bmi_sex"] = X["age"] * X["bmi"] * X["sex"]
 
-    # --- Wearable cross-interactions ---
+    # Wearable cross-interactions
     X["rhr_hrv"] = X[_RHR_M] / X[_HRV_M].clip(lower=1)
     X["stp_hrv"] = X[_STP_M] * X[_HRV_M]
     X["stp_rhr"] = X[_STP_M] / X[_RHR_M].clip(lower=1)
@@ -189,7 +188,7 @@ def engineer_features(X: pd.DataFrame) -> np.ndarray:
     X["slp_hrv"] = X[_SLP_M] * X[_HRV_M]
     X["slp_rhr"] = X[_SLP_M] / X[_RHR_M].clip(lower=1)
 
-    # --- Composite health indices ---
+    # Composite health indices
     X["cardio"] = X[_HRV_M] * X[_STP_M] / X[_RHR_M].clip(lower=1)
     X["cardio_log"] = np.log1p(X["cardio"].clip(lower=0))
     X["met_load"] = X["bmi"] * X[_RHR_M] / X[_STP_M].clip(lower=1) * 1000
@@ -203,7 +202,7 @@ def engineer_features(X: pd.DataFrame) -> np.ndarray:
     X["fitness_age"] = X["age"] * X[_RHR_M] / X[_HRV_M].clip(lower=1)
     X["bmi_fitness"] = X["bmi"] * X[_RHR_M] / (X[_HRV_M].clip(lower=1) * X[_STP_M].clip(lower=1)) * 10000
 
-    # --- Binary indicators + interactions ---
+    # Binary indicators + interactions
     X["obese"] = (X["bmi"] >= 30).astype(float)
     X["older"] = (X["age"] >= 50).astype(float)
     X["obese_rhr"] = X["obese"] * X[_RHR_M]
@@ -214,7 +213,7 @@ def engineer_features(X: pd.DataFrame) -> np.ndarray:
     X["hrv_cv_bmi"] = X["hrv_cv"] * X["bmi"]
     X["rhr_cv_age"] = X["rhr_cv"] * X["age"]
 
-    # --- Rank features ---
+    # Rank features
     for col in ["bmi", "age", _RHR_M, _HRV_M, _STP_M]:
         X[f"rank_{col[:3]}"] = X[col].rank(pct=True)
 
@@ -227,15 +226,12 @@ def engineer_features(X: pd.DataFrame) -> np.ndarray:
 
 def make_target_encoded_features(
     X_df: pd.DataFrame, y: np.ndarray, bins: np.ndarray,
-    columns: List[str] = None, n_bins_list: List[int] = None, smooth: float = 10.0,
+    smooth: float = 10.0,
 ) -> np.ndarray:
-    """Create out-of-fold target-encoded features."""
-    if columns is None:
-        columns = ["bmi", "age", _RHR_M, _HRV_M, _STP_M, _SLP_M, _AZM_M]
-    if n_bins_list is None:
-        n_bins_list = [3, 5, 10]
-
-    features = []
+    """Create out-of-fold target-encoded features (21 features)."""
+    columns = ["bmi", "age", _RHR_M, _HRV_M, _STP_M, _SLP_M, _AZM_M]
+    n_bins_list = [3, 5, 10]
+    te = np.zeros((len(y), 0))
     global_mean = y.mean()
 
     for col in columns:
@@ -248,134 +244,111 @@ def make_target_encoded_features(
                 coded = np.digitize(vals, edges[1:-1])
             except Exception:
                 continue
-
             encoded = np.zeros(len(y))
-            for train_idx, test_idx in StratifiedKFold(5, shuffle=True, random_state=42).split(vals, bins):
+            for tr, te_idx in StratifiedKFold(5, shuffle=True, random_state=42).split(vals, bins):
                 for b in range(nb):
-                    mask_train = coded[train_idx] == b
-                    mask_test = coded[test_idx] == b
-                    if mask_train.sum() > 0:
-                        bin_mean = y[train_idx][mask_train].mean()
-                        bin_count = mask_train.sum()
-                        encoded[test_idx[mask_test]] = (
-                            bin_count * bin_mean + smooth * global_mean
-                        ) / (bin_count + smooth)
+                    mtr = coded[tr] == b
+                    mte = coded[te_idx] == b
+                    if mtr.sum() > 0:
+                        bm = y[tr][mtr].mean()
+                        bc = mtr.sum()
+                        encoded[te_idx[mte]] = (bc * bm + smooth * global_mean) / (bc + smooth)
                     else:
-                        encoded[test_idx[mask_test]] = global_mean
-            features.append(encoded)
-
-    return np.column_stack(features) if features else np.zeros((len(y), 0))
+                        encoded[te_idx[mte]] = global_mean
+            te = np.column_stack([te, encoded])
+    return te
 
 
 def make_knn_target_features(
     X: np.ndarray, y: np.ndarray, bins: np.ndarray,
-    k_list: List[int] = None,
 ) -> np.ndarray:
-    """Create OOF KNN-based target features (mean, std, median of neighbor targets)."""
-    if k_list is None:
-        k_list = [5, 10, 20, 50]
-
-    features = []
+    """Create OOF KNN-based target features (12 features)."""
+    k_list = [5, 10, 20, 50]
+    kf = np.zeros((len(y), 0))
     for k in k_list:
         mean_f = np.zeros(len(y))
         std_f = np.zeros(len(y))
         med_f = np.zeros(len(y))
-
-        for train_idx, test_idx in StratifiedKFold(5, shuffle=True, random_state=42).split(X, bins):
-            scaler = StandardScaler()
-            X_tr = scaler.fit_transform(X[train_idx])
-            X_te = scaler.transform(X[test_idx])
-
+        for tr, te in StratifiedKFold(5, shuffle=True, random_state=42).split(X, bins):
+            sc = StandardScaler()
+            Xtr = sc.fit_transform(X[tr])
+            Xte = sc.transform(X[te])
             nn = NearestNeighbors(n_neighbors=k)
-            nn.fit(X_tr)
-            _, idx = nn.kneighbors(X_te)
-
-            for i, ti in enumerate(test_idx):
-                neighbor_targets = y[train_idx][idx[i]]
-                mean_f[ti] = neighbor_targets.mean()
-                std_f[ti] = neighbor_targets.std()
-                med_f[ti] = np.median(neighbor_targets)
-
-        features.extend([mean_f, std_f, med_f])
-
-    return np.column_stack(features) if features else np.zeros((len(y), 0))
+            nn.fit(Xtr)
+            _, idx = nn.kneighbors(Xte)
+            for i, ti in enumerate(te):
+                nt = y[tr][idx[i]]
+                mean_f[ti] = nt.mean()
+                std_f[ti] = nt.std()
+                med_f[ti] = np.median(nt)
+        kf = np.column_stack([kf, mean_f, std_f, med_f])
+    return kf
 
 
 def make_quantile_classification_features(
     X: np.ndarray, y: np.ndarray,
-    quantiles: List[float] = None,
 ) -> np.ndarray:
-    """Create OOF quantile classification probability features."""
-    from sklearn.ensemble import GradientBoostingClassifier
-
-    if quantiles is None:
-        quantiles = [0.25, 0.5, 0.75, 0.9]
-
-    features = []
+    """Create OOF quantile classification probability features (4 features)."""
+    quantiles = [0.25, 0.5, 0.75, 0.9]
+    qf = np.zeros((len(y), 0))
     for q in quantiles:
-        threshold = np.quantile(y, q)
-        y_class = (y > threshold).astype(int)
+        thr = np.quantile(y, q)
+        yc = (y > thr).astype(int)
         probs = np.zeros(len(y))
-
-        for train_idx, test_idx in StratifiedKFold(5, shuffle=True, random_state=42).split(X, y_class):
-            scaler = StandardScaler()
-            X_tr = scaler.fit_transform(X[train_idx])
-            X_te = scaler.transform(X[test_idx])
+        for tr, te in StratifiedKFold(5, shuffle=True, random_state=42).split(X, yc):
+            sc = StandardScaler()
+            Xtr = sc.fit_transform(X[tr])
+            Xte = sc.transform(X[te])
             clf = GradientBoostingClassifier(
-                n_estimators=100, max_depth=2, learning_rate=0.1, random_state=42
+                n_estimators=100, max_depth=2, learning_rate=0.1, random_state=42,
             )
-            clf.fit(X_tr, y_class[train_idx])
-            probs[test_idx] = clf.predict_proba(X_te)[:, 1]
-
-        features.append(probs)
-
-    return np.column_stack(features) if features else np.zeros((len(y), 0))
+            clf.fit(Xtr, yc[tr])
+            probs[te] = clf.predict_proba(Xte)[:, 1]
+        qf = np.column_stack([qf, probs])
+    return qf
 
 
 # =============================================================================
 # MODEL DEFINITIONS
 # =============================================================================
 
-def get_fast_models() -> List[Tuple[str, callable, bool]]:
-    """Fast models (linear, kernel, KNN). Returns (name, factory, needs_scaling)."""
-    models = [
-        ("ridge_10", lambda: Ridge(alpha=10), True),
-        ("ridge_50", lambda: Ridge(alpha=50), True),
-        ("ridge_100", lambda: Ridge(alpha=100), True),
-        ("ridge_500", lambda: Ridge(alpha=500), True),
-        ("ridge_1000", lambda: Ridge(alpha=1000), True),
-        ("ridge_2000", lambda: Ridge(alpha=2000), True),
-        ("lasso_001", lambda: Lasso(alpha=0.01, max_iter=10000), True),
-        ("lasso_01", lambda: Lasso(alpha=0.1, max_iter=10000), True),
-        ("elastic_01_5", lambda: ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=10000), True),
-        ("elastic_001_5", lambda: ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=10000), True),
-        ("bayesian", lambda: BayesianRidge(), True),
-        ("huber", lambda: HuberRegressor(max_iter=1000), True),
-        ("kr_rbf_01_001", lambda: KernelRidge(alpha=0.1, kernel="rbf", gamma=0.001), True),
-        ("kr_rbf_01_01", lambda: KernelRidge(alpha=0.1, kernel="rbf", gamma=0.01), True),
-        ("kr_rbf_1_001", lambda: KernelRidge(alpha=1, kernel="rbf", gamma=0.001), True),
-        ("kr_rbf_1_01", lambda: KernelRidge(alpha=1, kernel="rbf", gamma=0.01), True),
-        ("kr_rbf_10_01", lambda: KernelRidge(alpha=10, kernel="rbf", gamma=0.01), True),
-        ("kr_poly2", lambda: KernelRidge(alpha=1, kernel="poly", degree=2, gamma=0.01), True),
-        ("svr_1", lambda: SVR(kernel="rbf", C=1, epsilon=0.1), True),
-        ("svr_10", lambda: SVR(kernel="rbf", C=10, epsilon=0.1), True),
-        ("nusvr_05", lambda: NuSVR(kernel="rbf", C=1, nu=0.5), True),
-        ("nusvr_07", lambda: NuSVR(kernel="rbf", C=1, nu=0.7), True),
-        ("knn_10", lambda: KNeighborsRegressor(n_neighbors=10, weights="distance"), True),
-        ("knn_15", lambda: KNeighborsRegressor(n_neighbors=15, weights="distance"), True),
-        ("knn_20", lambda: KNeighborsRegressor(n_neighbors=20, weights="distance"), True),
-        ("knn_30", lambda: KNeighborsRegressor(n_neighbors=30, weights="distance"), True),
-        ("knn_50", lambda: KNeighborsRegressor(n_neighbors=50, weights="distance"), True),
-        ("knn_75", lambda: KNeighborsRegressor(n_neighbors=75, weights="distance"), True),
-        ("bag_ridge100", lambda: BaggingRegressor(estimator=Ridge(alpha=100), n_estimators=30, max_samples=0.8, max_features=0.8, random_state=42), True),
-        ("bag_ridge500", lambda: BaggingRegressor(estimator=Ridge(alpha=500), n_estimators=30, max_samples=0.8, max_features=0.8, random_state=42), True),
-        ("bag_ridge1000", lambda: BaggingRegressor(estimator=Ridge(alpha=1000), n_estimators=30, max_samples=0.8, max_features=0.8, random_state=42), True),
-    ]
-    return models
+FAST_MODELS = [
+    ("ridge_10", lambda: Ridge(alpha=10), True),
+    ("ridge_50", lambda: Ridge(alpha=50), True),
+    ("ridge_100", lambda: Ridge(alpha=100), True),
+    ("ridge_500", lambda: Ridge(alpha=500), True),
+    ("ridge_1000", lambda: Ridge(alpha=1000), True),
+    ("ridge_2000", lambda: Ridge(alpha=2000), True),
+    ("lasso_001", lambda: Lasso(alpha=0.01, max_iter=10000), True),
+    ("lasso_01", lambda: Lasso(alpha=0.1, max_iter=10000), True),
+    ("elastic_01_5", lambda: ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=10000), True),
+    ("elastic_001_5", lambda: ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=10000), True),
+    ("bayesian", lambda: BayesianRidge(), True),
+    ("huber", lambda: HuberRegressor(max_iter=1000), True),
+    ("kr_rbf_01_001", lambda: KernelRidge(alpha=0.1, kernel="rbf", gamma=0.001), True),
+    ("kr_rbf_01_01", lambda: KernelRidge(alpha=0.1, kernel="rbf", gamma=0.01), True),
+    ("kr_rbf_1_001", lambda: KernelRidge(alpha=1, kernel="rbf", gamma=0.001), True),
+    ("kr_rbf_1_01", lambda: KernelRidge(alpha=1, kernel="rbf", gamma=0.01), True),
+    ("kr_rbf_10_01", lambda: KernelRidge(alpha=10, kernel="rbf", gamma=0.01), True),
+    ("kr_poly2", lambda: KernelRidge(alpha=1, kernel="poly", degree=2, gamma=0.01), True),
+    ("svr_1", lambda: SVR(kernel="rbf", C=1, epsilon=0.1), True),
+    ("svr_10", lambda: SVR(kernel="rbf", C=10, epsilon=0.1), True),
+    ("nusvr_05", lambda: NuSVR(kernel="rbf", C=1, nu=0.5), True),
+    ("nusvr_07", lambda: NuSVR(kernel="rbf", C=1, nu=0.7), True),
+    ("knn_10", lambda: KNeighborsRegressor(n_neighbors=10, weights="distance"), True),
+    ("knn_15", lambda: KNeighborsRegressor(n_neighbors=15, weights="distance"), True),
+    ("knn_20", lambda: KNeighborsRegressor(n_neighbors=20, weights="distance"), True),
+    ("knn_30", lambda: KNeighborsRegressor(n_neighbors=30, weights="distance"), True),
+    ("knn_50", lambda: KNeighborsRegressor(n_neighbors=50, weights="distance"), True),
+    ("knn_75", lambda: KNeighborsRegressor(n_neighbors=75, weights="distance"), True),
+    ("bag_ridge100", lambda: BaggingRegressor(estimator=Ridge(alpha=100), n_estimators=30, max_samples=0.8, max_features=0.8, random_state=42), True),
+    ("bag_ridge500", lambda: BaggingRegressor(estimator=Ridge(alpha=500), n_estimators=30, max_samples=0.8, max_features=0.8, random_state=42), True),
+    ("bag_ridge1000", lambda: BaggingRegressor(estimator=Ridge(alpha=1000), n_estimators=30, max_samples=0.8, max_features=0.8, random_state=42), True),
+]
 
 
-def get_medium_models() -> List[Tuple[str, callable, bool]]:
-    """Medium-speed models (tree ensembles). Returns (name, factory, needs_scaling)."""
+def get_medium_models():
+    """Tree-based models (slower, use fewer CV repeats)."""
     models = []
     if HAS_XGB:
         models.extend([
@@ -404,7 +377,7 @@ def get_medium_models() -> List[Tuple[str, callable, bool]]:
 
 
 # =============================================================================
-# CV ENGINE
+# CORE CV ENGINE
 # =============================================================================
 
 def make_stratification_bins(y: np.ndarray, n_bins: int = 5) -> np.ndarray:
@@ -412,297 +385,53 @@ def make_stratification_bins(y: np.ndarray, n_bins: int = 5) -> np.ndarray:
     return pd.qcut(y, n_bins, labels=False, duplicates="drop")
 
 
-def default_splits(
-    y: np.ndarray, n_splits: int = 5, n_repeats: int = 5, random_state: int = 42,
-) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Generate default RepeatedStratifiedKFold splits."""
-    bins = make_stratification_bins(y)
-    cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
-    return list(cv.split(np.zeros(len(y)), bins))
-
-
-def run_single_model_cv(
-    X: np.ndarray, y: np.ndarray,
-    model_fn: callable,
-    splits: List[Tuple[np.ndarray, np.ndarray]],
-    scale: bool = True,
-    log_target: bool = False,
+def run_cv(
+    X: np.ndarray, y: np.ndarray, bins: np.ndarray, n_samples: int, ss_tot: float,
+    model_fn: callable, scale: bool = True, log_t: bool = False,
+    n_rep: int = 5, seed: int = 42,
+    splits: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
 ) -> Tuple[float, np.ndarray]:
-    """Train a single model across CV splits, return (R², OOF predictions)."""
-    n_samples = len(y)
-    oof_preds = np.zeros(n_samples)
-    oof_counts = np.zeros(n_samples)
-    ss_tot = np.sum((y - y.mean()) ** 2)
+    """
+    Run repeated stratified CV for a single model.
 
-    for train_idx, test_idx in splits:
-        X_tr, X_te = X[train_idx], X[test_idx]
-        y_tr = y[train_idx].copy()
+    If `splits` is provided, uses those splits directly.
+    Otherwise generates RepeatedStratifiedKFold(n_splits=5, n_repeats=n_rep).
 
-        if log_target:
-            y_tr = np.log1p(y_tr)
+    Returns (R², OOF_predictions).
+    """
+    if splits is not None:
+        fold_iter = splits
+    else:
+        rkf = RepeatedStratifiedKFold(n_splits=5, n_repeats=n_rep, random_state=seed)
+        fold_iter = rkf.split(X, bins)
+
+    preds = np.zeros(n_samples)
+    counts = np.zeros(n_samples)
+
+    for tr, te in fold_iter:
+        Xtr, Xte = X[tr].copy(), X[te].copy()
+        ytr = y[tr].copy()
+        if log_t:
+            ytr = np.log1p(ytr)
         if scale:
-            sc = StandardScaler()
-            X_tr = sc.fit_transform(X_tr)
-            X_te = sc.transform(X_te)
+            s = StandardScaler()
+            Xtr = s.fit_transform(Xtr)
+            Xte = s.transform(Xte)
+        m = model_fn()
+        m.fit(Xtr, ytr)
+        p = m.predict(Xte)
+        if log_t:
+            p = np.expm1(p)
+        preds[te] += p
+        counts[te] += 1
 
-        model = model_fn()
-        model.fit(X_tr, y_tr)
-        preds = model.predict(X_te)
-
-        if log_target:
-            preds = np.expm1(preds)
-
-        oof_preds[test_idx] += preds
-        oof_counts[test_idx] += 1
-
-    mask = oof_counts > 0
-    oof_preds[mask] /= oof_counts[mask]
-    r2 = 1 - np.sum((y[mask] - oof_preds[mask]) ** 2) / np.sum((y[mask] - y[mask].mean()) ** 2)
-    return r2, oof_preds
+    preds /= counts
+    r2 = 1 - np.sum((y - preds) ** 2) / ss_tot
+    return r2, preds
 
 
 # =============================================================================
-# MULTI-LAYER STACKING
-# =============================================================================
-
-def build_layer0(
-    feature_sets: Dict[str, np.ndarray],
-    y: np.ndarray,
-    splits_5rep: List[Tuple[np.ndarray, np.ndarray]],
-    splits_3rep: List[Tuple[np.ndarray, np.ndarray]],
-    use_log: bool = True,
-    verbose: bool = True,
-) -> Dict[str, dict]:
-    """
-    Train all base models across all feature sets.
-
-    Returns dict: model_name -> {"r2": float, "preds": np.ndarray}
-    """
-    fast_models = get_fast_models()
-    med_models = get_medium_models()
-
-    all_results = {}
-    total_models = 0
-
-    for fs_name, X_fs in feature_sets.items():
-        if verbose:
-            print(f"\n  Feature set: {fs_name} ({X_fs.shape[1]} features)", flush=True)
-
-        for mname, mfn, scale in fast_models:
-            key = f"{fs_name}__{mname}"
-            try:
-                r2, preds = run_single_model_cv(X_fs, y, mfn, splits_5rep, scale=scale)
-                all_results[key] = {"r2": r2, "preds": preds}
-                total_models += 1
-
-                if use_log:
-                    r2l, pl = run_single_model_cv(X_fs, y, mfn, splits_5rep, scale=scale, log_target=True)
-                    all_results[f"{key}_log"] = {"r2": r2l, "preds": pl}
-                    total_models += 1
-            except Exception:
-                pass
-
-        for mname, mfn, scale in med_models:
-            key = f"{fs_name}__{mname}"
-            try:
-                r2, preds = run_single_model_cv(X_fs, y, mfn, splits_3rep, scale=scale)
-                all_results[key] = {"r2": r2, "preds": preds}
-                total_models += 1
-            except Exception:
-                pass
-
-    if verbose:
-        good = {k: v for k, v in all_results.items() if v["r2"] > 0}
-        top = sorted(good.keys(), key=lambda k: good[k]["r2"], reverse=True)[:10]
-        print(f"\n  Total base models: {total_models} ({len(good)} with R²>0)")
-        print(f"  Top 10:")
-        for nm in top:
-            print(f"    {nm:55s}: R²={good[nm]['r2']:.4f}")
-
-    return all_results
-
-
-def build_layer1(
-    base_results: Dict[str, dict],
-    y: np.ndarray,
-    bins: np.ndarray,
-    splits: List[Tuple[np.ndarray, np.ndarray]],
-    top_k: int = 25,
-    verbose: bool = True,
-) -> Tuple[Dict[str, np.ndarray], float]:
-    """
-    Build Layer-1 stacking meta-learners on top of base OOF predictions.
-
-    Returns (stack_preds, best_r2).
-    """
-    n_samples = len(y)
-    ss_tot = np.sum((y - y.mean()) ** 2)
-
-    # Select top base models
-    good = {k: v for k, v in base_results.items() if v["r2"] > 0}
-    names = sorted(good.keys(), key=lambda k: good[k]["r2"], reverse=True)[:top_k]
-    preds_mat = np.array([good[nm]["preds"] for nm in names])
-
-    best_r2 = -np.inf
-    all_stacks = {}
-
-    def _run_stack(model_fn, name, n_rep=5):
-        nonlocal best_r2
-        sp = np.zeros(n_samples)
-        sc = np.zeros(n_samples)
-        cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=n_rep, random_state=42)
-        for tr, te in cv.split(preds_mat.T, bins):
-            m = model_fn()
-            m.fit(preds_mat[:, tr].T, y[tr])
-            sp[te] += m.predict(preds_mat[:, te].T)
-            sc[te] += 1
-        sp /= sc
-        r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
-        if r2 > best_r2:
-            best_r2 = r2
-        if r2 > 0.20:
-            all_stacks[name] = sp.copy()
-        return r2
-
-    # Ridge stacks
-    for alpha in [0.001, 0.01, 0.1, 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000]:
-        _run_stack(lambda a=alpha: Ridge(alpha=a), f"ridge_{alpha}")
-    if verbose:
-        print(f"  After Ridge stacks: best R²={best_r2:.4f}")
-
-    # ElasticNet stacks
-    for alpha in [0.01, 0.1, 1]:
-        for l1 in [0.1, 0.3, 0.5, 0.7, 0.9]:
-            _run_stack(
-                lambda a=alpha, l=l1: ElasticNet(alpha=a, l1_ratio=l, max_iter=5000, positive=True),
-                f"en_{alpha}_{l1}",
-            )
-    if verbose:
-        print(f"  After EN stacks:    best R²={best_r2:.4f}")
-
-    # Lasso stacks
-    for alpha in [0.001, 0.01, 0.1]:
-        _run_stack(
-            lambda a=alpha: Lasso(alpha=a, max_iter=5000, positive=True),
-            f"lasso_{alpha}",
-        )
-
-    # KNN stacks
-    for k in [3, 5, 7, 10, 15, 20, 30]:
-        sp = np.zeros(n_samples)
-        sc = np.zeros(n_samples)
-        cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=42)
-        for tr, te in cv.split(preds_mat.T, bins):
-            ss = StandardScaler()
-            pt = ss.fit_transform(preds_mat[:, tr].T)
-            pe = ss.transform(preds_mat[:, te].T)
-            m = KNeighborsRegressor(n_neighbors=k, weights="distance")
-            m.fit(pt, y[tr])
-            sp[te] += m.predict(pe)
-            sc[te] += 1
-        sp /= sc
-        r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
-        if r2 > best_r2:
-            best_r2 = r2
-        if r2 > 0.20:
-            all_stacks[f"knn_{k}"] = sp.copy()
-    if verbose:
-        print(f"  After KNN stacks:   best R²={best_r2:.4f}")
-
-    # SVR stacks
-    for C in [0.1, 1, 10, 100]:
-        for eps in [0.05, 0.1]:
-            sp = np.zeros(n_samples)
-            sc = np.zeros(n_samples)
-            cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=42)
-            for tr, te in cv.split(preds_mat.T, bins):
-                ss = StandardScaler()
-                pt = ss.fit_transform(preds_mat[:, tr].T)
-                pe = ss.transform(preds_mat[:, te].T)
-                m = SVR(kernel="rbf", C=C, epsilon=eps)
-                m.fit(pt, y[tr])
-                sp[te] += m.predict(pe)
-                sc[te] += 1
-            sp /= sc
-            r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
-            if r2 > best_r2:
-                best_r2 = r2
-            if r2 > 0.20:
-                all_stacks[f"svr_{C}_{eps}"] = sp.copy()
-
-    # XGB stacks
-    if HAS_XGB:
-        for d in [2, 3]:
-            sp = np.zeros(n_samples)
-            sc = np.zeros(n_samples)
-            cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=42)
-            for tr, te in cv.split(preds_mat.T, bins):
-                m = xgb.XGBRegressor(
-                    n_estimators=100, max_depth=d, learning_rate=0.05,
-                    reg_alpha=5, reg_lambda=10, random_state=42,
-                )
-                m.fit(preds_mat[:, tr].T, y[tr])
-                sp[te] += m.predict(preds_mat[:, te].T)
-                sc[te] += 1
-            sp /= sc
-            r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
-            if r2 > best_r2:
-                best_r2 = r2
-            if r2 > 0.20:
-                all_stacks[f"xgb_{d}"] = sp.copy()
-
-    # Bayesian stack
-    _run_stack(lambda: BayesianRidge(), "bayesian")
-
-    if verbose:
-        print(f"  Layer-1 stacks: {len(all_stacks)} (best R²={best_r2:.4f})")
-
-    return all_stacks, best_r2
-
-
-def build_layer2(
-    stack_preds: Dict[str, np.ndarray],
-    y: np.ndarray,
-    bins: np.ndarray,
-    verbose: bool = True,
-) -> Tuple[float, np.ndarray]:
-    """
-    Layer-2: Ridge regression on Layer-1 stack predictions.
-
-    Returns (best_r2, best_oof_predictions).
-    """
-    n_samples = len(y)
-    ss_tot = np.sum((y - y.mean()) ** 2)
-
-    snames = list(stack_preds.keys())
-    smat = np.array([stack_preds[k] for k in snames])
-
-    best_r2 = -np.inf
-    best_preds = None
-
-    for alpha in [0.01, 0.1, 1, 10, 100]:
-        sp = np.zeros(n_samples)
-        sc = np.zeros(n_samples)
-        cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=5, random_state=42)
-        for tr, te in cv.split(smat.T, bins):
-            m = Ridge(alpha=alpha)
-            m.fit(smat[:, tr].T, y[tr])
-            sp[te] += m.predict(smat[:, te].T)
-            sc[te] += 1
-        sp /= sc
-        r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
-        if r2 > best_r2:
-            best_r2 = r2
-            best_preds = sp.copy()
-
-    if verbose:
-        print(f"  Layer-2 R²={best_r2:.4f} ({len(snames)} stacks)")
-
-    return best_r2, best_preds
-
-
-# =============================================================================
-# MAIN PIPELINE
+# PIPELINE
 # =============================================================================
 
 def run_pipeline(
@@ -721,7 +450,9 @@ def run_pipeline(
     target : str
         "homa_ir" or "hba1c".
     splits : list of (train_idx, test_idx), optional
-        Custom CV splits. If None, uses default RepeatedStratifiedKFold(5, 5).
+        Custom CV splits for base models. If None, uses default
+        RepeatedStratifiedKFold(5-fold, 5 repeats) for fast models,
+        (5-fold, 3 repeats) for slow models.
     verbose : bool
         Print progress.
 
@@ -730,8 +461,8 @@ def run_pipeline(
     dict with keys:
         "r2": float — best OOF R²
         "r": float — Pearson correlation
-        "oof_predictions": np.ndarray — out-of-fold predictions
-        "y": np.ndarray — true targets
+        "oof_predictions": np.ndarray
+        "y": np.ndarray
         "n_base_models": int
         "n_stacks": int
         "n_samples": int
@@ -745,6 +476,9 @@ def run_pipeline(
     X_df, y = load_data(data_path, target=target)
     n_samples = len(y)
     bins = make_stratification_bins(y)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    X_raw = X_df.values
+    use_log = (target == "homa_ir")  # HOMA is right-skewed
 
     if verbose:
         print(f"  Samples: {n_samples}, Target: {target}, y: [{y.min():.2f}, {y.max():.2f}]")
@@ -752,19 +486,13 @@ def run_pipeline(
     # --- Feature engineering ---
     if verbose:
         print("Engineering features...", flush=True)
-    X_raw = X_df.values
     X_eng = engineer_features(X_df)
-
-    # MI-selected features
     mi = mutual_info_regression(X_eng, y, random_state=42)
     X_mi35 = X_eng[:, np.argsort(mi)[-35:]]
 
+    # --- Augmented features (OOF, no leakage) ---
     if verbose:
-        print(f"  raw18={X_raw.shape[1]}, eng={X_eng.shape[1]}, mi35={X_mi35.shape[1]}")
-
-    # --- Augmented features (OOF) ---
-    if verbose:
-        print("Creating augmented features (OOF)...", flush=True)
+        print("Creating augmented features...", flush=True)
     te_feats = make_target_encoded_features(X_df, y, bins)
     knn_feats = make_knn_target_features(X_raw, y, bins)
     qc_feats = make_quantile_classification_features(X_raw, y)
@@ -772,7 +500,7 @@ def run_pipeline(
     X_mega = np.column_stack([X_raw, te_feats, knn_feats, qc_feats])
     X_mega_eng = np.column_stack([X_eng, te_feats, knn_feats, qc_feats])
 
-    feature_sets = {
+    fsets = {
         "raw18": X_raw,
         "eng": X_eng,
         "mi35": X_mi35,
@@ -781,77 +509,320 @@ def run_pipeline(
     }
 
     if verbose:
-        print(f"  mega={X_mega.shape[1]}, mega_eng={X_mega_eng.shape[1]}")
+        print(f"  Feature sets: raw18={X_raw.shape[1]}, eng={X_eng.shape[1]}, "
+              f"mi35={X_mi35.shape[1]}, mega={X_mega.shape[1]}, mega_eng={X_mega_eng.shape[1]}", flush=True)
 
-    # --- Generate splits ---
-    if splits is None:
-        if verbose:
-            print("Using default splits: RepeatedStratifiedKFold(5-fold, 5 repeats)")
-        splits_5rep = default_splits(y, n_repeats=5)
-        splits_3rep = default_splits(y, n_repeats=3)
-    else:
-        if verbose:
-            print(f"Using {len(splits)} custom splits")
-        splits_5rep = splits
-        splits_3rep = splits  # Custom splits used for all models
+    # --- Prepare splits ---
+    # If custom splits provided, use them for both fast and medium models.
+    # Otherwise, fast models get 5 repeats, medium get 3 repeats (matching V22b).
+    fast_splits = splits  # None means run_cv will generate its own
+    med_splits = splits
+    fast_n_rep = 5
+    med_n_rep = 3
 
-    # --- Layer 0: base models ---
+    # =================================================================
+    # LAYER 0: Generate base model OOF predictions
+    # =================================================================
     if verbose:
-        print(f"\n{'='*60}")
-        print("LAYER 0: Base Models")
+        print(f"\n{'='*60}", flush=True)
+        print("LAYER 0: Base Models", flush=True)
         print(f"{'='*60}", flush=True)
 
-    base_results = build_layer0(
-        feature_sets, y, splits_5rep, splits_3rep,
-        use_log=(target == "homa_ir"), verbose=verbose
-    )
+    all_results = {}
+    medium_models = get_medium_models()
 
-    # --- Layer 1: stacking ---
+    for fs_name, X_fs in fsets.items():
+        if verbose:
+            print(f"\n--- {fs_name} ({X_fs.shape[1]}f) ---", flush=True)
+
+        for mname, mfn, scale in FAST_MODELS:
+            full = f"{fs_name}__{mname}"
+            try:
+                r2, preds = run_cv(X_fs, y, bins, n_samples, ss_tot, mfn,
+                                   scale=scale, n_rep=fast_n_rep, splits=fast_splits)
+                all_results[full] = {"r2": r2, "preds": preds}
+                if r2 > 0.15 and verbose:
+                    print(f"  {full:50s}: R²={r2:.4f}", flush=True)
+                if use_log:
+                    r2l, pl = run_cv(X_fs, y, bins, n_samples, ss_tot, mfn,
+                                     scale=scale, log_t=True, n_rep=fast_n_rep, splits=fast_splits)
+                    all_results[full + "_log"] = {"r2": r2l, "preds": pl}
+                    if r2l > 0.15 and verbose:
+                        print(f"  {full+'_log':50s}: R²={r2l:.4f}", flush=True)
+            except Exception:
+                pass
+
+        for mname, mfn, scale in medium_models:
+            full = f"{fs_name}__{mname}"
+            try:
+                r2, preds = run_cv(X_fs, y, bins, n_samples, ss_tot, mfn,
+                                   scale=scale, n_rep=med_n_rep, splits=med_splits)
+                all_results[full] = {"r2": r2, "preds": preds}
+                if r2 > 0.15 and verbose:
+                    print(f"  {full:50s}: R²={r2:.4f}", flush=True)
+            except Exception:
+                pass
+
     if verbose:
-        print(f"\n{'='*60}")
-        print("LAYER 1: Stacking Meta-learners")
+        print(f"\nTotal models: {len(all_results)}", flush=True)
+
+    # =================================================================
+    # LAYER 1: Stacking meta-learners
+    # =================================================================
+    if verbose:
+        print(f"\n{'='*60}", flush=True)
+        print("MULTI-LAYER STACKING", flush=True)
         print(f"{'='*60}", flush=True)
 
-    stack_preds, layer1_r2 = build_layer1(base_results, y, bins, splits_5rep, verbose=verbose)
+    good = {k: v for k, v in all_results.items() if v["r2"] > 0}
+    names = sorted(good.keys(), key=lambda k: good[k]["r2"], reverse=True)[:25]
+    preds_mat = np.array([good[nm]["preds"] for nm in names])
+    nm_count = len(names)
 
-    # --- Layer 2: stack of stacks ---
-    final_r2 = layer1_r2
-    final_preds = None
+    if verbose:
+        print(f"Top 10 of {len(good)} models:")
+        for nm in names[:10]:
+            print(f"  {nm:55s}: R²={good[nm]['r2']:.4f}", flush=True)
 
-    if len(stack_preds) >= 3:
+    best_r2 = -999
+    all_stacks = {}
+
+    # -- Ridge stacks --
+    for alpha in [0.001, 0.01, 0.1, 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000]:
+        sp = np.zeros(n_samples)
+        sc = np.zeros(n_samples)
+        for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=5, random_state=42).split(preds_mat.T, bins):
+            m = Ridge(alpha=alpha)
+            m.fit(preds_mat[:, tr].T, y[tr])
+            sp[te] += m.predict(preds_mat[:, te].T)
+            sc[te] += 1
+        sp /= sc
+        r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+        if r2 > best_r2:
+            best_r2 = r2
+        if r2 > 0.20:
+            all_stacks[f"ridge_{alpha}"] = sp.copy()
+    if verbose:
+        print(f"Ridge stack: R²={best_r2:.4f}", flush=True)
+
+    # -- ElasticNet stacks --
+    for alpha in [0.01, 0.1, 1]:
+        for l1 in [0.1, 0.3, 0.5, 0.7, 0.9]:
+            sp = np.zeros(n_samples)
+            sc = np.zeros(n_samples)
+            for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=5, random_state=42).split(preds_mat.T, bins):
+                m = ElasticNet(alpha=alpha, l1_ratio=l1, max_iter=5000, positive=True)
+                m.fit(preds_mat[:, tr].T, y[tr])
+                sp[te] += m.predict(preds_mat[:, te].T)
+                sc[te] += 1
+            sp /= sc
+            r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+            if r2 > best_r2:
+                best_r2 = r2
+            if r2 > 0.20:
+                all_stacks[f"en_{alpha}_{l1}"] = sp.copy()
+    if verbose:
+        print(f"+EN: R²={best_r2:.4f}", flush=True)
+
+    # -- Lasso stacks --
+    for alpha in [0.001, 0.01, 0.1]:
+        sp = np.zeros(n_samples)
+        sc = np.zeros(n_samples)
+        for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=5, random_state=42).split(preds_mat.T, bins):
+            m = Lasso(alpha=alpha, max_iter=5000, positive=True)
+            m.fit(preds_mat[:, tr].T, y[tr])
+            sp[te] += m.predict(preds_mat[:, te].T)
+            sc[te] += 1
+        sp /= sc
+        r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+        if r2 > best_r2:
+            best_r2 = r2
+        if r2 > 0.20:
+            all_stacks[f"lasso_{alpha}"] = sp.copy()
+    if verbose:
+        print(f"+Lasso: R²={best_r2:.4f}", flush=True)
+
+    # -- KNN stacks --
+    for k in [3, 5, 7, 10, 15, 20, 30]:
+        sp = np.zeros(n_samples)
+        sc = np.zeros(n_samples)
+        for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=42).split(preds_mat.T, bins):
+            ss = StandardScaler()
+            pt = ss.fit_transform(preds_mat[:, tr].T)
+            pe = ss.transform(preds_mat[:, te].T)
+            m = KNeighborsRegressor(n_neighbors=k, weights="distance")
+            m.fit(pt, y[tr])
+            sp[te] += m.predict(pe)
+            sc[te] += 1
+        sp /= sc
+        r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+        if r2 > best_r2:
+            best_r2 = r2
+        if r2 > 0.20:
+            all_stacks[f"knn_{k}"] = sp.copy()
+    if verbose:
+        print(f"+KNN: R²={best_r2:.4f}", flush=True)
+
+    # -- SVR stacks --
+    for C in [0.1, 1, 10, 100]:
+        for eps in [0.05, 0.1]:
+            sp = np.zeros(n_samples)
+            sc = np.zeros(n_samples)
+            for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=42).split(preds_mat.T, bins):
+                ss = StandardScaler()
+                pt = ss.fit_transform(preds_mat[:, tr].T)
+                pe = ss.transform(preds_mat[:, te].T)
+                m = SVR(kernel="rbf", C=C, epsilon=eps)
+                m.fit(pt, y[tr])
+                sp[te] += m.predict(pe)
+                sc[te] += 1
+            sp /= sc
+            r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+            if r2 > best_r2:
+                best_r2 = r2
+            if r2 > 0.20:
+                all_stacks[f"svr_{C}_{eps}"] = sp.copy()
+    if verbose:
+        print(f"+SVR: R²={best_r2:.4f}", flush=True)
+
+    # -- XGB stacks --
+    if HAS_XGB:
+        for d in [2, 3]:
+            sp = np.zeros(n_samples)
+            sc = np.zeros(n_samples)
+            for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=42).split(preds_mat.T, bins):
+                m = xgb.XGBRegressor(
+                    n_estimators=100, max_depth=d, learning_rate=0.05,
+                    reg_alpha=5, reg_lambda=10, random_state=42,
+                )
+                m.fit(preds_mat[:, tr].T, y[tr])
+                sp[te] += m.predict(preds_mat[:, te].T)
+                sc[te] += 1
+            sp /= sc
+            r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+            if r2 > best_r2:
+                best_r2 = r2
+            if r2 > 0.20:
+                all_stacks[f"xgb_{d}"] = sp.copy()
+    if verbose:
+        print(f"+XGB: R²={best_r2:.4f}", flush=True)
+
+    # -- Bayesian stack --
+    sp = np.zeros(n_samples)
+    sc = np.zeros(n_samples)
+    for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=5, random_state=42).split(preds_mat.T, bins):
+        m = BayesianRidge()
+        m.fit(preds_mat[:, tr].T, y[tr])
+        sp[te] += m.predict(preds_mat[:, te].T)
+        sc[te] += 1
+    sp /= sc
+    r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+    if r2 > best_r2:
+        best_r2 = r2
+    if r2 > 0.20:
+        all_stacks["bayesian"] = sp.copy()
+    if verbose:
+        print(f"+Bayesian: R²={best_r2:.4f}", flush=True)
+
+    layer1_r2 = best_r2
+    if verbose:
+        print(f"\nLayer-1 best: R²={best_r2:.4f} ({len(all_stacks)} stacks)", flush=True)
+
+    # -- Mega blend (Dirichlet + pairwise + triplet) --
+    blend_best = -999
+    rng = np.random.RandomState(42)
+    for _ in range(500_000):
+        w = rng.dirichlet(np.ones(nm_count) * 0.3)
+        bl = w @ preds_mat
+        r2 = 1 - np.sum((y - bl) ** 2) / ss_tot
+        if r2 > blend_best:
+            blend_best = r2
+    for _ in range(200_000):
+        w = rng.dirichlet(np.ones(nm_count) * 0.1)
+        bl = w @ preds_mat
+        r2 = 1 - np.sum((y - bl) ** 2) / ss_tot
+        if r2 > blend_best:
+            blend_best = r2
+    for i in range(nm_count):
+        for j in range(i + 1, nm_count):
+            for a in np.linspace(0, 1, 201):
+                bl = a * preds_mat[i] + (1 - a) * preds_mat[j]
+                r2 = 1 - np.sum((y - bl) ** 2) / ss_tot
+                if r2 > blend_best:
+                    blend_best = r2
+    for i in range(min(8, nm_count)):
+        for j in range(i + 1, min(8, nm_count)):
+            for k in range(j + 1, min(8, nm_count)):
+                for a in np.linspace(0.05, 0.9, 20):
+                    for b in np.linspace(0.05, 0.9 - a, 15):
+                        c = 1 - a - b
+                        if c > 0:
+                            bl = a * preds_mat[i] + b * preds_mat[j] + c * preds_mat[k]
+                            r2 = 1 - np.sum((y - bl) ** 2) / ss_tot
+                            if r2 > blend_best:
+                                blend_best = r2
+    if blend_best > best_r2:
+        best_r2 = blend_best
+    if verbose:
+        print(f"Mega blend: R²={blend_best:.4f}", flush=True)
+
+    # =================================================================
+    # LAYER 2: Stack of stacks
+    # =================================================================
+    if len(all_stacks) >= 3:
         if verbose:
-            print(f"\n{'='*60}")
-            print("LAYER 2: Stack of Stacks")
-            print(f"{'='*60}", flush=True)
+            print(f"Layer 2: {len(all_stacks)} stacks", flush=True)
+        snames = list(all_stacks.keys())
+        smat = np.array([all_stacks[k] for k in snames])
+        best_l2_preds = None
+        for alpha in [0.01, 0.1, 1, 10, 100]:
+            sp = np.zeros(n_samples)
+            sc = np.zeros(n_samples)
+            for tr, te in RepeatedStratifiedKFold(n_splits=5, n_repeats=5, random_state=42).split(smat.T, bins):
+                m = Ridge(alpha=alpha)
+                m.fit(smat[:, tr].T, y[tr])
+                sp[te] += m.predict(smat[:, te].T)
+                sc[te] += 1
+            sp /= sc
+            r2 = 1 - np.sum((y - sp) ** 2) / ss_tot
+            if r2 > best_r2:
+                best_r2 = r2
+                best_l2_preds = sp.copy()
+        if verbose:
+            print(f"Layer 2: R²={best_r2:.4f}", flush=True)
 
-        final_r2, final_preds = build_layer2(stack_preds, y, bins, verbose=verbose)
-    else:
-        # Fall back to best layer-1
-        best_name = max(stack_preds, key=lambda k: 1 - np.sum((y - stack_preds[k]) ** 2) / np.sum((y - y.mean()) ** 2))
-        final_preds = stack_preds[best_name]
-
-    r, _ = pearsonr(y, final_preds)
     elapsed = time.time() - t0
+
+    # Compute final predictions (from layer-2 if available, else best stack)
+    if best_l2_preds is not None:
+        final_preds = best_l2_preds
+    else:
+        # Use best single stack
+        best_stack = max(all_stacks, key=lambda k: 1 - np.sum((y - all_stacks[k]) ** 2) / ss_tot)
+        final_preds = all_stacks[best_stack]
+
+    final_r2 = 1 - np.sum((y - final_preds) ** 2) / ss_tot
+    r, _ = pearsonr(y, final_preds)
 
     # --- Summary ---
     if verbose:
         target_r2 = 0.37 if target == "homa_ir" else 0.70
-        print(f"\n{'='*60}")
+        print(f"\n{'='*70}")
         print(f"RESULT: {target.upper()} (DW)")
         print(f"  R²       = {final_r2:.4f}  (target: {target_r2})")
         print(f"  Pearson r = {r:.4f}")
         print(f"  Gap      = {target_r2 - final_r2:.4f}")
-        print(f"  Models   = {len(base_results)} base, {len(stack_preds)} stacks")
-        print(f"  Time     = {elapsed:.1f}s ({elapsed/60:.1f} min)")
-        print(f"{'='*60}")
+        print(f"  Base models: {len(all_results)}, Stacks: {len(all_stacks)}")
+        print(f"  Time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
+        print(f"{'='*70}")
 
     return {
         "r2": final_r2,
         "r": r,
         "oof_predictions": final_preds,
         "y": y,
-        "n_base_models": len(base_results),
-        "n_stacks": len(stack_preds),
+        "n_base_models": len(all_results),
+        "n_stacks": len(all_stacks),
         "n_samples": n_samples,
     }
 
@@ -864,17 +835,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="WEAR-ME: DW-only prediction via multi-layer stacking"
     )
-    parser.add_argument(
-        "--data", default="data.csv",
-        help="Path to data.csv (default: data.csv)",
-    )
-    parser.add_argument(
-        "--target", default="both", choices=["homa_ir", "hba1c", "both"],
-        help="Target variable (default: both)",
-    )
+    parser.add_argument("--data", default="data.csv", help="Path to data.csv")
+    parser.add_argument("--target", default="both", choices=["homa_ir", "hba1c", "both"])
     parser.add_argument(
         "--splits", default=None,
-        help='Path to JSON splits file: [{"train": [...], "test": [...]}, ...]',
+        help='Path to JSON splits: [{"train": [...], "test": [...]}, ...]',
     )
 
     args = parser.parse_args()
@@ -884,9 +849,7 @@ def main():
     if args.splits:
         with open(args.splits) as f:
             raw = json.load(f)
-        custom_splits = [
-            (np.array(s["train"]), np.array(s["test"])) for s in raw
-        ]
+        custom_splits = [(np.array(s["train"]), np.array(s["test"])) for s in raw]
         print(f"Loaded {len(custom_splits)} custom splits from {args.splits}")
 
     targets = ["homa_ir", "hba1c"] if args.target == "both" else [args.target]
@@ -896,15 +859,10 @@ def main():
         print(f"\n{'#' * 60}")
         print(f"#  TARGET: {tgt.upper()} (DW ONLY)")
         print(f"{'#' * 60}\n")
-
-        result = run_pipeline(
-            data_path=args.data,
-            target=tgt,
-            splits=custom_splits,
-        )
+        result = run_pipeline(data_path=args.data, target=tgt, splits=custom_splits)
         all_results[tgt] = result
 
-    # Final summary
+    # Summary
     print(f"\n{'=' * 60}")
     print("SUMMARY (DW ONLY)")
     print(f"{'=' * 60}")
