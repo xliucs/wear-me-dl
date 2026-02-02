@@ -78,7 +78,7 @@ def load_data():
     df['liver_stress'] = df['alt'] * df['ggt'] / 100  # liver enzymes often elevated with IR
     df['crp_trig'] = df['crp'] * df['triglycerides'] / 100
     df['bmi_cubed'] = df['bmi'] ** 3 / 10000
-    df['wbc_bmi'] = df['wbc'] * df['bmi']
+    df['wbc_bmi'] = df['white_blood_cell'] * df['bmi'] if 'white_blood_cell' in df.columns else 0
     df['uric_bmi'] = df['uric_acid'] * df['bmi'] if 'uric_acid' in df.columns else 0
     
     label_cols = ['True_hba1c','True_HOMA_IR','True_IR_Class','True_Diabetes_2_Class',
