@@ -2,12 +2,14 @@
 
 ## Best Results (Stratified 5-Fold CV, 3-5 Repeats)
 
-| Target | Best R² | Paper Target | Gap | Best Method |
-|--------|---------|-------------|-----|-------------|
-| **HOMA_IR ALL** | **0.5948** | 0.65 | 0.055 | HGBR_log 58% + XGB_d6 42% blend |
-| **HOMA_IR DW** | **0.3250** | 0.37 | 0.045 | Multi-layer stacking of 242 models (V17c) |
-| **hba1c ALL** | **0.4916** | 0.85 | 0.358 | XGB_mae 35% + ExtraTrees 33% + XGB_mse 32% |
-| **hba1c DW** | **0.1677** | 0.70 | 0.532 | Mega blend (V17c) |
+| Target | Best R² | Pearson r | Paper Target | Gap | Best Method |
+|--------|---------|-----------|-------------|-----|-------------|
+| **HOMA_IR ALL** | **0.5948** | **0.771** | 0.65 | 0.055 | HGBR_log 58% + XGB_d6 42% blend |
+| **HOMA_IR DW** | **0.3250** | **0.570** | 0.37 | 0.045 | Multi-layer stacking of 242 models (V17c) |
+| **hba1c ALL** | **0.4916** | **0.701** | 0.85 | 0.358 | XGB_mae 35% + ExtraTrees 33% + XGB_mse 32% |
+| **hba1c DW** | **0.1677** | **0.410** | 0.70 | 0.532 | Mega blend (V17c) |
+
+> **Note**: Pearson r = √R² (valid for well-calibrated OOF predictions with unbiased mean).
 
 - **ALL** = Demographics + Wearables + Blood Biomarkers (65 raw features)
 - **DW** = Demographics + Wearables only (18 raw features: age, sex, bmi + 15 Fitbit stats)
