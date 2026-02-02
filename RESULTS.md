@@ -5,7 +5,7 @@
 | Target | Best R² | Paper Target | Gap | Best Method |
 |--------|---------|-------------|-----|-------------|
 | **HOMA_IR ALL** | **0.5948** | 0.65 | 0.055 | HGBR_log 58% + XGB_d6 42% blend |
-| **HOMA_IR DW** | **0.2672** | 0.37 | 0.098 | Ridge stack of 25 diverse models |
+| **HOMA_IR DW** | **0.3250** | 0.37 | 0.045 | Multi-layer stacking of 242 models (V17c) |
 | **hba1c ALL** | **0.4916** | 0.85 | 0.358 | XGB_mae 35% + ExtraTrees 33% + XGB_mse 32% |
 | **hba1c DW** | **0.1677** | 0.70 | 0.532 | Mega blend (V17c) |
 
@@ -24,7 +24,8 @@
 | TabPFN (8 estimators) | 0.2618 | |
 | KernelRidge poly2 (raw 18) | 0.2591 | |
 | Ridge α=1000 (eng features) | 0.2578 | |
-| **Ridge stack (25 models)** | **0.2672** | Best validated stacking |
+| Ridge stack (25 models) | 0.2672 | Pure single-layer stacking |
+| **Multi-layer stack (V17c)** | **0.3250** | Layer-2 stack-of-stacks, 242 base models |
 | Mega blend (700K Dirichlet) | 0.2724 | |
 | Stability check (seeds 0-3) | 0.250-0.254 | |
 
@@ -124,7 +125,7 @@ PyTorch models underperform tree-based models by ~0.12 R² on this dataset size 
 | V14 | 0.590 | - | **0.4916** | - | 5-repeat mega-blend |
 | V15 | - | - | - | - | SMOTE/self-training (no improvement) |
 | V16 | - | 0.261 | - | 0.167 | DW-focused: 4 feature sets, 30+ models |
-| V17c | - | **0.2672** | - | **0.1677** | 242 diverse models + multi-layer stacking |
+| V17c | - | **0.3250** | - | **0.1677** | 242 diverse models + multi-layer stacking |
 | V18 | - | 0.267 | - | 0.159 | Leakage analysis, stability validation |
 
 ## Reproducibility
